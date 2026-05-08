@@ -43,7 +43,7 @@ def inv_logit(x):
     return 1- 0.5 * np.exp(x) / (1 + np.exp(x))  
 
 
-def OptimRho(y, x, z, Tprime, T, rho_ini, ML, h):
+def OptimRho(y, x, z, Tprime, T, rho_ini, ML, h, keep_mask=None):
     """
     Optimize the hyperparameter `rho` for a given weighting scheme.
 
@@ -74,7 +74,7 @@ def OptimRho(y, x, z, Tprime, T, rho_ini, ML, h):
     array
         Optimal hyperparameter values (untransformed).
     """
-    fun_optim = lambda XX: CriterionF(XX, y, x, z, Tprime, T, ML, horizon=h)[0]
+    fun_optim = lambda XX: CriterionF(XX, y, x, z, Tprime, T, ML, horizon=h, keep_mask=keep_mask)[0]
     res = opt.minimize(fun_optim, rho_ini, method='BFGS')
 
     return res.x
@@ -98,8 +98,9 @@ def MLE_AR(y, X, w):
         array
             Estimated coefficient vector (p+1 x 1).
         """
-    W = np.diag(w[:, 0])
-    beta = np.linalg.inv(X.T @ W @ X) @ (X.T @ W @ y.reshape(-1, 1))
+    wy = w * y.reshape(-1, 1)
+    wx = X * w
+    beta = np.linalg.solve(X.T @ wx, X.T @ wy)
     return beta
 
 
@@ -146,7 +147,7 @@ def make_weights(z, Tprime, T_CV, ML, rho=None):
         raise NotImplementedError(f"Unknown weighting scheme: {ML}")
 
 
-def CriterionF(rho0, y, x, z, Tprime, T_CV, ML, horizon=1):  # TODO
+def CriterionF(rho0, y, x, z, Tprime, T_CV, ML, horizon=1, keep_mask=None):  # TODO
     """
         Cross-validation criterion for tuning weighting parameters.
 
@@ -192,29 +193,36 @@ def CriterionF(rho0, y, x, z, Tprime, T_CV, ML, horizon=1):  # TODO
     Tprime_h = Tprime - (horizon - 1)           # finish sample earlier if horizon>1
     vE, X_hat = np.zeros(T_CV), np.zeros(T_CV)  # store errors and predictions over validation sample
     w_mat = make_weights(z, Tprime_h, T_CV, ML, rho=rho)
+    if keep_mask is not None:
+        keep_windows = np.lib.stride_tricks.sliding_window_view(
+            keep_mask.astype(float), window_shape=Tprime_h
+        )[:T_CV]
+        w_mat = w_mat * keep_windows
+    p = x.shape[1]
+
+    X0_all = np.empty((T_CV, Tprime_h, p + 1))
+    X0_all[:, :, 0] = 1.0
+    for t in range(T_CV):
+        X0_all[t, :, 1:] = x[t:Tprime_h + t]
+
+    X_new_all = np.empty((T_CV, p + 1))
+    X_new_all[:, 0] = 1.0
+    X_new_all[:, 1:] = x[Tprime_h:Tprime_h + T_CV]
 
     for t in range(T_CV):
         w = w_mat[t, :].reshape(-1, 1)
-
-        p = np.shape(x)[1]  # lags in AR(p)
-        X_new = [1]         # add constant 
-        X0 = np.zeros((Tprime_h, p + 1))
-        X0[:, 0] = np.ones(Tprime_h)
-        for j in range(p):
-            X0[:, j + 1] = x[t:Tprime_h + t, j]  # regressors in sample
-            X_new += [x[Tprime_h + t, j]]        # regressors out of sample
-
-        X_new = np.array(X_new).reshape(p + 1, 1)
-
+        X0 = X0_all[t]
+        X_new = X_new_all[t].copy()
         theta = MLE_AR(y[t:Tprime_h + t], X0, w)  # Weighted OLS
+        theta_flat = theta[:, 0]
 
         # make prediction
         for _ in range(horizon):
-            X_new_h = sum(theta * X_new)
+            X_new_h = theta_flat[0] + np.dot(theta_flat[1:], X_new[1:])
             if horizon > 1:
-                X_new[2:] = X_new[1:-1].copy()
-                X_new[1] = X_new_h.copy()
-        X_hat[t] = X_new_h.item()
+                X_new[2:] = X_new[1:-1]
+                X_new[1] = X_new_h
+        X_hat[t] = float(X_new_h)
         vE[t] = y[Tprime + t] - X_hat[t]  # prediction error
 
     Q = np.sqrt(np.mean(vE ** 2))

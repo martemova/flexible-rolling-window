@@ -78,19 +78,15 @@ def build_table(tables, series_list, horizon, horizon_label):
             - Diebold–Mariano test p-values
             - Selected tuning parameters (FRW and ORW)
 
-        Results are reported for three subsamples:
-            1. Mixed economic conditions
-            2. Expansion periods
-            3. Recession periods
+        Results are reported for the subsamples available in ``tables``.
 
         Parameters
         ----------
         tables : dict
             Dictionary containing forecast evaluation results for each series.
-            For each series ``s``, the dictionary must include:
-                - ``tables[s]['res']``: full-sample results
-                - ``tables[s]['res_expansion']``: expansion results
-                - ``tables[s]['res_recess']``: recession results
+            For each series ``s``, the dictionary must include
+            ``tables[s]['res']`` and may optionally include
+            ``tables[s]['res_expansion']`` and ``tables[s]['res_recess']``.
         series_list : list of str
             List of series names to include in the table.
         horizon : int
@@ -103,46 +99,37 @@ def build_table(tables, series_list, horizon, horizon_label):
         str
             A LaTeX-formatted table as a single string.
         """
-    n_rows = 6  # FRW/MLE, DM, FRW/ORW, DM, FRW/MS, DM
+    n_rows = tables[series_list[0]]['res'].shape[0]
+    sections = [("res", "Forecasting over mixed economic conditions")]
+    sample_table = tables[series_list[0]]
+    if "res_expansion" in sample_table:
+        sections.append(("res_expansion", "Forecasting during expansion"))
+    if "res_recess" in sample_table:
+        sections.append(("res_recess", "Forecasting during Great recession"))
+
     cols = []
     for s in series_list:
         cols += [f"{s}_Ratio", f"{s}_rho2"]
-    df = pd.DataFrame(np.nan, index=range(n_rows * 3), columns=cols, dtype=object)  # 3 sections
+    df = pd.DataFrame(np.nan, index=range(n_rows * len(sections)), columns=cols, dtype=object)
 
     # Fill the DataFrame
     for s in series_list:
-        table_full = tables[s]['res']
-        table_exp = tables[s]['res_expansion']
-        table_recess = tables[s]['res_recess']
-        for i in range(0, n_rows, 2):
-            # Full sample
-            ratio_row = table_full[i, :2] if horizon == 1 else table_full[i, 2:]
-            dm_row = table_full[i+1, :2] if horizon == 1 else table_full[i+1, 2:]
-            formatted = format_row(ratio_row, dm_row)
-            df.loc[i, f"{s}_Ratio"] = formatted[0]
-            df.loc[i, f"{s}_rho2"] = formatted[1]
-            df.loc[i+1, f"{s}_Ratio"] = fmt_dm(dm_row[0])
-            df.loc[i+1, f"{s}_rho2"] = fmt_dm(dm_row[1])
+        for section_idx, (section_key, _) in enumerate(sections):
+            table_section = tables[s][section_key]
+            base_row = section_idx * n_rows
+            for i in range(0, n_rows, 2):
+                ratio_row = table_section[i, :2] if horizon == 1 else table_section[i, 2:]
+                dm_row = table_section[i+1, :2] if horizon == 1 else table_section[i+1, 2:]
+                formatted = format_row(ratio_row, dm_row)
+                df.loc[base_row + i, f"{s}_Ratio"] = formatted[0]
+                df.loc[base_row + i, f"{s}_rho2"] = formatted[1]
+                df.loc[base_row + i + 1, f"{s}_Ratio"] = fmt_dm(dm_row[0])
+                df.loc[base_row + i + 1, f"{s}_rho2"] = fmt_dm(dm_row[1])
 
-            # Expansion sample
-            ratio_row = table_exp[i, :2] if horizon == 1 else table_exp[i, 2:]
-            dm_row = table_exp[i+1, :2] if horizon == 1 else table_exp[i+1, 2:]
-            formatted = format_row(ratio_row, dm_row)
-            df.loc[i+6, f"{s}_Ratio"] = formatted[0]
-            df.loc[i+6, f"{s}_rho2"] = formatted[1]
-            df.loc[i+7, f"{s}_Ratio"] = fmt_dm(dm_row[0])
-            df.loc[i+7, f"{s}_rho2"] = fmt_dm(dm_row[1])
-
-            # Recession sample
-            ratio_row = table_recess[i, :2] if horizon == 1 else table_recess[i, 2:]
-            dm_row = table_recess[i+1, :2] if horizon == 1 else table_recess[i+1, 2:]
-            formatted = format_row(ratio_row, dm_row)
-            df.loc[i+12, f"{s}_Ratio"] = formatted[0]
-            df.loc[i+12, f"{s}_rho2"] = formatted[1]
-            df.loc[i+13, f"{s}_Ratio"] = fmt_dm(dm_row[0])
-            df.loc[i+13, f"{s}_rho2"] = fmt_dm(dm_row[1])
-
-    index_labels = ["FRW/MLE","", "FRW/ORW","", "FRW/MS",""]*3
+    row_labels = ["FRW/MLE", "", "FRW/ORW", ""]
+    if n_rows == 6:
+        row_labels += ["FRW/MS", ""]
+    index_labels = row_labels * len(sections)
     df.index = index_labels
 
     # --- Build LaTeX manually with raw strings ---
@@ -153,21 +140,15 @@ def build_table(tables, series_list, horizon, horizon_label):
     latex_lines.append(r"\begin{tabular}{%s}" % ("l" + "ll"*len(series_list)))
     latex_lines.append(r"\toprule")
     latex_lines.append(" & ".join([r""] + [rf"\multicolumn{{2}}{{c}}{{{s}}}" for s in series_list]) + r" \\")
-    latex_lines.append(" & ".join([r"", "Ratio", r"$\rho_2$"] * len(series_list)) + r" \\")
+    latex_lines.append(" & ".join([r""] + ["Ratio", r"$\rho_2$"] * len(series_list)) + r" \\")
 
     # Section headers and rows
-    section_rows = [0, 6, 12]  # starting row of each section
-    section_names = [
-        "Forecasting over mixed economic conditions",
-        "Forecasting during expansion",
-        "Forecasting during Great recession"
-    ]
-
-    for sec_idx, start_row in enumerate(section_rows):
+    for sec_idx, (_, section_name) in enumerate(sections):
+        start_row = sec_idx * n_rows
         latex_lines.append(r"\midrule")
-        latex_lines.append(rf"\multicolumn{{{1 + len(series_list)*2}}}{{l}}{{\textit{{{section_names[sec_idx]}}}}}\\\midrule")
+        latex_lines.append(rf"\multicolumn{{{1 + len(series_list)*2}}}{{l}}{{\textit{{{section_name}}}}}\\\midrule")
 
-        for row_offset in range(0, 6, 2):
+        for row_offset in range(0, n_rows, 2):
             row_main = start_row + row_offset
             row_dm = row_main + 1
 

@@ -33,264 +33,319 @@ Outputs
 - results/tables/Table4.tex
 - results/Figures/alpha_FRW.pdf
 
+
+ALternative option is to replicate Tables 5 and 6 from Appendix 
+
 author: Mariia Artemova
 """
 
 # =========================
 # Imports and paths
 # =========================
+
+from __future__ import annotations
+
+import argparse
+import pickle
+from dataclasses import dataclass
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 from statsmodels.tsa.ar_model import ar_select_order
-import pickle
-from pathlib import Path
 
-from frw.Empirics.models.MarkovSwitching import fit_markov_switching
-from frw.Empirics.models.WML import OptimRho, CriterionF
 from frw.Empirics.fun.build_table import build_table
-from frw.Empirics.fun.create_figure import figure
 from frw.Empirics.fun.evaluate_forecast import compute_forecast_comparisons
-from frw.Empirics.models.WML import logit, inv_logit
-
-BASE_DIR = Path(__file__).resolve().parents[2]
-DATA_DIR = BASE_DIR / "data"
-RESULTS_DIR = BASE_DIR / "results"
-
-# =========================
-# Load data
-# =========================
-
-# Macroeconomic series (monthly)
-data_full = pd.read_csv(DATA_DIR / "macro_data.csv", index_col="Date")  
-data_full.index = pd.date_range(start='1948-01-01', periods=len(data_full), freq='MS')
-
-# Series used in the empirical exercise
-series = ["UNRATE"]#["INDPRO", "PAYEMS", "UNRATE", "CUMFNS"] 
-
-# NBER recession indicator, used only for plots
-NBER = pd.read_csv(DATA_DIR / 'USREC.csv', index_col='Date')
-NBER.index = pd.date_range(start='1949-01-01', periods=len(NBER), freq='MS')
-NBER = NBER[(NBER.index.year > 1949)]
-
-# =========================
-# State variable (Sahm rule)
-# =========================
-
-# Sahm indicator used to define the binary state variable Z_t
-df_s = data_full['SAHMCURRENT']
-
-# State variable:
-# Z_t = 1 if Sahm indicator >= 0.5 AND increasing
-state = (df_s.iloc[1:] >= 0.5) * (df_s.diff(1).iloc[1:] > 0) 
-state = state[(state.index.year > 1949)]
-
-# =========================
-# Forecasting setup
-# =========================
-horizons = [1, 3]       # forecast horizons
-fperiods = 144          # out-of-sample evaluation length (12 years)
-
-# Containers for results
-res = {}                # coefficient paths for plotting
-tables = {}             # forecast evaluation tables
-
-# Weighting scheme for FRW
+from frw.Empirics.models.WML import CriterionF, OptimRho, logit
 
 
-# Transformations for optimization
-start_val = lambda x: [logit(x[0])]
-par_optim = lambda x: [inv_logit(x[0])]
+SERIES = ["INDPRO", "PAYEMS", "UNRATE", "CUMFNS"]
+HORIZONS = [1, 3]
 
 
-# =========================
-# Main loop over series
-# =========================
-for s in series: 
-    print(f"Processing series: {s}")
+@dataclass(frozen=True)
+class RunConfig:
+    name: str
+    macro_file: str
+    nber_file: str
+    fperiods: int
+    table_h1: str
+    table_h3: str
+    include_ms: bool
+    include_recession_table: bool
+    sample_end: str | None = None
+    exclusion_start: str | None = None
+    exclusion_end: str | None = None
+    save_pickle: bool = False
+    save_figure: bool = False
+    pickle_name: str = "ForecastEval.pkl"
+    figure_series: str = "UNRATE"
+    figure_p: int = 6
+    figure_k_values: tuple[int, ...] = (1,)
 
-    # Tables: rows = models/statistics, columns = horizons
-    mTable = np.zeros((6, 4))   # full sample results
-    mTable2 = np.zeros((6, 4))  # recession results
-    mTable3 = np.zeros((6, 4))  # expansion results
 
-    # -------------------------
-    # Data transformation
-    # -------------------------
-    df = data_full[s] 
+CONFIGS = {
+    "main": RunConfig(
+        name="main",
+        macro_file="macro_data.csv",
+        nber_file="USREC.csv",
+        fperiods=144,
+        table_h1="Table3.tex",
+        table_h3="Table4.tex",
+        include_ms=True,
+        include_recession_table=True,
+        sample_end="2019-12-01",
+        save_pickle=True,
+        save_figure=True,
+    ),
+    "appendix": RunConfig(
+        name="appendix",
+        macro_file="macro_data.csv",
+        nber_file="USREC.csv",
+        fperiods=213,
+        table_h1="Table5.tex",
+        table_h3="Table6.tex",
+        include_ms=False,
+        include_recession_table=False,
+        exclusion_start="2020-03-01",
+        exclusion_end="2021-09-01",
+    ),
+}
 
-    # Annual growth rates or differences
-    if s != 'UNRATE' and s != 'CUMFNS':
-        data = 100 * np.log(df).diff(12)
-    else:
-        data = 10 * (df).diff(12)
 
-    data = data[(data.index.year > 1949)]  # start sample in 1950
+def _repo_paths():
+    base_dir = Path(__file__).resolve().parents[2]
+    return base_dir, base_dir / "data", base_dir / "results"
 
-    # -------------------------
-    # Lag selection
-    # -------------------------
-    mod = ar_select_order(data.iloc[:len(data) - fperiods], maxlag=12, ic='bic')  
-    p = np.max(mod.ar_lags)
 
-    # -------------------------
-    # Sample construction
-    # -------------------------
-    y = np.array(data)[p:]
-    T_full = np.size(y)
-    
-    window = int(0.7 * (T_full - fperiods))  # estimation window 
-    CV_period = T_full - window - fperiods   # cross-validation window
-    rw_sizes = np.arange(48, window, 3)      # ORW grid 
+def _date_mask(index, start, end):
+    if start is None or end is None:
+        return pd.Series(False, index=index)
+    return (index >= pd.Timestamp(start)) & (index <= pd.Timestamp(end))
 
-    # Construct lag matrix
-    N = len(y)
-    x = np.zeros((N, p))
-    for i in range(1, p + 1):
-        x[:, i - 1] = data[p - i: - i]  
 
-    # Lagged state variable
-    z = np.array(state)[p - 1:-1, None]
+def run(config: RunConfig):
+    _, data_dir, results_dir = _repo_paths()
 
-    # Expansion/recession mask for OOS period
-    mask = np.array(NBER[-fperiods:]) == 0 #expansion periods
+    data_full = pd.read_csv(data_dir / config.macro_file, index_col="Date")
+    data_full.index = pd.date_range(start="1948-01-01", periods=len(data_full), freq="MS")
+    if config.sample_end is not None:
+        data_full = data_full[data_full.index <= pd.Timestamp(config.sample_end)]
 
-    # Storage for forecasts and errors
-    f_ORW, f_FRW, f_ML, f_MS = (np.full((fperiods, len(horizons)), np.nan) for _ in range(4))
-    e_ORW, e_FRW, e_ML, e_MS = (np.full((fperiods, len(horizons)), np.nan) for _ in range(4))
+    nber = pd.read_csv(data_dir / config.nber_file, index_col="Date")
+    nber.index = pd.date_range(start="1949-01-01", periods=len(nber), freq="MS")
+    if config.sample_end is not None:
+        nber = nber[nber.index <= pd.Timestamp(config.sample_end)]
+    nber = nber[(nber.index.year > 1949)]
+    nber_values = nber.to_numpy()
+    evaluation_exclusion = _date_mask(nber.index, config.exclusion_start, config.exclusion_end)
 
-    # Storage for coefficient paths
-    theta_ML = np.full((fperiods, len(horizons), p + 1), np.nan)
-    theta_FRW = np.full((fperiods, len(horizons), p + 1), np.nan)
+    df_s = data_full["SAHMCURRENT"]
+    state = (df_s.iloc[1:] >= 0.5) * (df_s.diff(1).iloc[1:] > 0)
+    state = state[(state.index.year > 1949)]
+    if config.exclusion_start is not None and config.exclusion_end is not None:
+        state.loc[_date_mask(state.index, config.exclusion_start, config.exclusion_end)] = 0
+    state_values = state.to_numpy().reshape(-1, 1)
 
-    # =========================
-    # Loop over horizons
-    # =========================
-    jj = 0
-    for ind_H, h in enumerate(horizons):
-        print(f"  Forecast horizon h = {h}")
+    tables = {}
+    res = {} if config.save_figure else None
+    start_val = lambda x: [logit(x[0])]
 
-        # -------------------------
-        # Determine FRW parameter (Algorithm 1)
-        # -------------------------
-        rho0 = OptimRho(
-            y[:window + CV_period],
-            x[:window + CV_period],
-            z[:window + CV_period],
-            window,
-            CV_period,
-            start_val([0.6]),
-            'binary',
-            h
-        )
+    for s in SERIES:
+        print(f"Processing series: {s}")
 
-        # -------------------------
-        # ORW window selection
-        # -------------------------
-        cv_loss_rw = np.zeros(len(rw_sizes))
-        for kk, RW_size in enumerate(rw_sizes):
-            cv_loss_rw[kk] = CriterionF(
-                RW_size,
-                y[:window + CV_period],
-                x[:window + CV_period],
-                z[:window + CV_period],
+        n_rows = 6 if config.include_ms else 4
+        m_table = np.zeros((n_rows, 4))
+        m_table_expansion = np.zeros((n_rows, 4))
+        m_table_recession = np.zeros((n_rows, 4)) if config.include_recession_table else None
+
+        df = data_full[s]
+        if s not in {"UNRATE", "CUMFNS"}:
+            data = 100 * np.log(df).diff(12)
+        else:
+            data = 10 * df.diff(12)
+        data = data[(data.index.year > 1949)]
+
+        estimation_keep = ~_date_mask(data.index, config.exclusion_start, config.exclusion_end)
+
+        mod = ar_select_order(data.iloc[:len(data) - config.fperiods], maxlag=12, ic="bic")
+        p = np.max(mod.ar_lags)
+
+        data_values = data.to_numpy()
+        y = data_values[p:]
+        keep_mask = estimation_keep[p:]
+        t_full = np.size(y)
+
+        window = int(0.7 * (t_full - config.fperiods))
+        cv_period = t_full - window - config.fperiods
+        rw_sizes = np.arange(48, window, 3)
+
+        x = np.column_stack([data_values[p - i:-i] for i in range(1, p + 1)])
+        z = state_values[p - 1:-1]
+
+        expansion_mask = nber_values[-config.fperiods:] == 0
+        evaluation_mask = (~evaluation_exclusion[-config.fperiods:])
+
+        f_orw, f_frw, f_ml = (np.full((config.fperiods, len(HORIZONS)), np.nan) for _ in range(3))
+        e_orw, e_frw, e_ml = (np.full((config.fperiods, len(HORIZONS)), np.nan) for _ in range(3))
+        if config.include_ms:
+            f_ms = np.full((config.fperiods, len(HORIZONS)), np.nan)
+            e_ms = np.full((config.fperiods, len(HORIZONS)), np.nan)
+
+        theta_ml = np.full((config.fperiods, len(HORIZONS), p + 1), np.nan)
+        theta_frw = np.full((config.fperiods, len(HORIZONS), p + 1), np.nan)
+
+        jj = 0
+        for ind_h, h in enumerate(HORIZONS):
+            print(f"  Forecast horizon h = {h}")
+
+            rho0 = OptimRho(
+                y[:window + cv_period],
+                x[:window + cv_period],
+                z[:window + cv_period],
                 window,
-                CV_period,
-                "RW",
-                horizon=h
-            )[0]
-
-        ORW = rw_sizes[np.argmin(cv_loss_rw)]
-
-        # -------------------------
-        # Recursive forecasting
-        # -------------------------
-        for l in range(fperiods):
-
-            vRollY = y[CV_period + l:]
-            vRollX = x[CV_period + l:]
-            vRollZ = z[CV_period + l:]
-
-            if l != fperiods - 1:
-                vRollY = vRollY[:-fperiods + l + 1]
-                vRollX = vRollX[:-fperiods + l + 1]
-                vRollZ = vRollZ[:-fperiods + l + 1]
-
-            # ML
-            _, e_ML[l, ind_H], f_ML[l, ind_H], theta_hat_ML = CriterionF(
-                None, vRollY, vRollX, vRollZ, window, 1, "ML", horizon=h
+                cv_period,
+                start_val([0.6]),
+                "binary",
+                h,
+                keep_mask=keep_mask[:window + cv_period],
             )
 
-            # ORW
-            _, e_ORW[l, ind_H], f_ORW[l, ind_H], _ = CriterionF(
-                ORW, vRollY, vRollX, None, window, 1, "RW", horizon=h
-            )
+            cv_loss_rw = np.zeros(len(rw_sizes))
+            for kk, rw_size in enumerate(rw_sizes):
+                cv_loss_rw[kk] = CriterionF(
+                    rw_size,
+                    y[:window + cv_period],
+                    x[:window + cv_period],
+                    z[:window + cv_period],
+                    window,
+                    cv_period,
+                    "RW",
+                    horizon=h,
+                    keep_mask=keep_mask[:window + cv_period],
+                )[0]
 
-            # FRW
-            _, e_FRW[l, ind_H], f_FRW[l, ind_H], theta_hat_FRW = CriterionF(
-                rho0, vRollY, vRollX, vRollZ, window, 1, 'binary', horizon=h
-            )
+            orw = rw_sizes[np.argmin(cv_loss_rw)]
 
-            # Store *all* coefficients
-            theta_ML[l, ind_H, :] = theta_hat_ML[:, 0]
-            theta_FRW[l, ind_H, :] = theta_hat_FRW[:, 0]
+            for l in range(config.fperiods):
+                start = cv_period + l
+                stop = window + start + 1
+                v_roll_y = y[start:stop]
+                v_roll_x = x[start:stop]
+                v_roll_z = z[start:stop]
+                v_roll_keep = keep_mask[start:stop]
 
-            # Markov-switching benchmark (R-based)
-            y_lag = vRollY[-p - h:-h][::-1].copy()
-            y_hat_ms = fit_markov_switching(vRollY, window, y_lag, p=p, h=h)
-            e_MS[l, ind_H] = vRollY[-1] - y_hat_ms
-            f_MS[l, ind_H] = y_hat_ms
+                _, e_ml[l, ind_h], f_ml[l, ind_h], theta_hat_ml = CriterionF(
+                    None, v_roll_y, v_roll_x, v_roll_z, window, 1, "ML", horizon=h, keep_mask=v_roll_keep
+                )
+                _, e_orw[l, ind_h], f_orw[l, ind_h], _ = CriterionF(
+                    orw, v_roll_y, v_roll_x, None, window, 1, "RW", horizon=h, keep_mask=v_roll_keep
+                )
+                _, e_frw[l, ind_h], f_frw[l, ind_h], theta_hat_frw = CriterionF(
+                    rho0, v_roll_y, v_roll_x, v_roll_z, window, 1, "binary", horizon=h, keep_mask=v_roll_keep
+                )
 
-        # -------------------------
-        # Forecast evaluation
-        # -------------------------
-        for name, current_mask in zip(
-                ["full", "expansion", "recession"],
-                [np.ones(fperiods, bool), mask[:, 0], ~mask[:, 0]]
-        ):
-            results = compute_forecast_comparisons(
-                y, f_FRW[:, ind_H], f_ML[:, ind_H], f_ORW[:, ind_H], f_MS[:, ind_H],
-                e_FRW[:, ind_H], e_ML[:, ind_H], e_ORW[:, ind_H], e_MS[:, ind_H],
-                current_mask, rho0, ORW, fperiods, h
-            )
+                theta_ml[l, ind_h, :] = theta_hat_ml[:, 0]
+                theta_frw[l, ind_h, :] = theta_hat_frw[:, 0]
 
-            if name == "full":
-                mTable[:, jj:jj + 2] = results
-            elif name == "recession":
-                mTable2[:, jj:jj + 2] = results
-            else:
-                mTable3[:, jj:jj + 2] = results
+                if config.include_ms:
+                    from frw.Empirics.models.MarkovSwitching import fit_markov_switching
 
-        jj += 2
+                    y_lag = v_roll_y[-p - h:-h][::-1].copy()
+                    y_hat_ms = fit_markov_switching(v_roll_y, window, y_lag, p=p, h=h)
+                    e_ms[l, ind_h] = v_roll_y[-1] - y_hat_ms
+                    f_ms[l, ind_h] = y_hat_ms
 
-        res[f"{s}_AR{p}"] = {
-            "theta_FRW": theta_FRW,  # (fperiods, horizons, p+1)
-            "theta_ML": theta_ML,  # (fperiods, horizons, p+1)
-            "p": p,
-            "horizons": horizons
-        }
+            sections = [
+                ("full", np.ones(config.fperiods, dtype=bool) & evaluation_mask),
+                ("expansion", expansion_mask[:, 0] & evaluation_mask),
+            ]
+            if config.include_recession_table:
+                sections.append(("recession", (~expansion_mask[:, 0]) & evaluation_mask))
 
-        # Store tables
+            for name, current_mask in sections:
+                kwargs = {}
+                if config.include_ms:
+                    kwargs["X_hat_MS"] = f_ms[:, ind_h]
+                    kwargs["vE_MS"] = e_ms[:, ind_h]
+
+                results = compute_forecast_comparisons(
+                    y,
+                    f_frw[:, ind_h],
+                    f_ml[:, ind_h],
+                    f_orw[:, ind_h],
+                    e_frw[:, ind_h],
+                    e_ml[:, ind_h],
+                    e_orw[:, ind_h],
+                    current_mask,
+                    rho0,
+                    orw,
+                    config.fperiods,
+                    h,
+                    **kwargs,
+                )
+
+                if name == "full":
+                    m_table[:, jj:jj + 2] = results
+                elif name == "expansion":
+                    m_table_expansion[:, jj:jj + 2] = results
+                else:
+                    m_table_recession[:, jj:jj + 2] = results
+
+            jj += 2
+
         tables[s] = {
-            "res": mTable,
-            "res_recess": mTable2,
-            "res_expansion": mTable3,
+            "res": m_table,
+            "res_expansion": m_table_expansion,
         }
+        if config.include_recession_table:
+            tables[s]["res_recess"] = m_table_recession
 
-# =========================
-# Save and output results
-# =========================
+        if res is not None:
+            res[f"{s}_AR{p}"] = {
+                "theta_FRW": theta_frw,
+                "theta_ML": theta_ml,
+                "p": p,
+                "horizons": HORIZONS,
+            }
 
-with open(RESULTS_DIR / "ForecastEval.pkl", "wb") as f:
-    pickle.dump(tables, f)
+    latex_h1 = build_table(tables, SERIES, 1, horizon_label="n=1")
+    latex_h3 = build_table(tables, SERIES, 3, horizon_label="n=3")
 
-for k in range(7):
-    figure(res, np.asarray(state)[-fperiods:], NBER[-fperiods:].index, s="UNRATE", p=6, k=k)
+    with open(results_dir / "tables" / config.table_h1, "w") as f:
+        f.write(latex_h1)
+    with open(results_dir / "tables" / config.table_h3, "w") as f:
+        f.write(latex_h3)
 
-latex_h1 = build_table(tables, series, 1, horizon_label="n=1")
-latex_h3 = build_table(tables, series, 3, horizon_label="n=3")
+    if config.save_pickle:
+        with open(results_dir / config.pickle_name, "wb") as f:
+            pickle.dump(tables, f)
 
-with open(RESULTS_DIR / "tables" / "Table3.tex", "w") as f:
-    f.write(latex_h1)
+    if config.save_figure and res is not None:
+        from frw.Empirics.fun.create_figure import figure
 
-with open(RESULTS_DIR / "tables" / "Table4.tex", "w") as f:
-    f.write(latex_h3)
+        for k in config.figure_k_values:
+            figure(
+                res,
+                np.asarray(state)[-config.fperiods:],
+                nber[-config.fperiods:].index,
+                s=config.figure_series,
+                p=config.figure_p,
+                k=k,
+            )
+
+    return tables
+
+
+# run_setup = "main" 
+run_setup = "appendix"
+
+parser = argparse.ArgumentParser(description="Run one of the empirical forecasting exercises.")
+parser.add_argument(
+    "--variant",
+    choices=sorted(CONFIGS),
+    default=run_setup,
+    help="Which existing script behavior to run.",
+)
+args = parser.parse_args()
+run(CONFIGS[args.variant])

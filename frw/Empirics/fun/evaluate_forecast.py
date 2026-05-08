@@ -39,10 +39,10 @@ def DieboldMarianoTest(vE1, vE2, K):
         K : int
             HAC lag length
 
-        Returns
-        -------
-        float
-            p-value of the Diebold–Mariano test.
+    Returns
+    -------
+    float
+        p-value of the Diebold–Mariano test.
         """
     d = vE1 ** 2 - vE2 ** 2
     X = np.ones(len(d))
@@ -51,8 +51,9 @@ def DieboldMarianoTest(vE1, vE2, K):
     return model.pvalues[0]
 
 
-def compute_forecast_comparisons(y, X_hat_FRW, X_hat_ML, X_hat_ORW, X_hat_MS,
-                                 vE_FRW, vE_ML, vE_ORW, vE_MS, mask, rho, ORW, fperiods, h):
+def compute_forecast_comparisons(y, X_hat_FRW, X_hat_ML, X_hat_ORW,
+                                 vE_FRW, vE_ML, vE_ORW, mask, rho, ORW, fperiods, h,
+                                 X_hat_MS=None, vE_MS=None):
     """
     Compute forecast comparisons across competing models and methods.
 
@@ -78,16 +79,12 @@ def compute_forecast_comparisons(y, X_hat_FRW, X_hat_ML, X_hat_ORW, X_hat_MS,
         Forecasts from the ML benchmark.
     X_hat_ORW : array
         Forecasts from the ORW benchmark.
-    X_hat_MS : array
-        Forecasts from the Markov-switching benchmark.
     vE_FRW : array
         Forecast errors from FRW.
     vE_ML : array
         Forecast errors from ML.
     vE_ORW : array
         Forecast errors from ORW.
-    vE_MS : array
-        Forecast errors from the Markov-switching model.
     mask : array (bool)
         Boolean mask indicating which observations are used
         in the evaluation.
@@ -99,14 +96,16 @@ def compute_forecast_comparisons(y, X_hat_FRW, X_hat_ML, X_hat_ORW, X_hat_MS,
         Length of the out-of-sample evaluation period.
     h : int
         Forecast horizon.
+    X_hat_MS : array, optional
+        Forecasts from the Markov-switching benchmark.
+    vE_MS : array, optional
+        Forecast errors from the Markov-switching model.
 
     Returns
     -------
     np.ndarray
-        A (6 × 2) array containing:
-            - Rows 0,2,4: RMSE ratios (FRW vs ML, ORW, MS)
-            - Rows 1,3,5: corresponding DM test p-values
-            - Column 1: selected parameter values (rho, ORW)
+        A (4 × 2) or (6 × 2) array depending on whether the optional
+        Markov-switching benchmark is supplied.
     """
     par_optim = lambda x: [inv_logit(x[0])]
     def rmse(a, b):
@@ -121,24 +120,27 @@ def compute_forecast_comparisons(y, X_hat_FRW, X_hat_ML, X_hat_ORW, X_hat_MS,
     f_FRW = X_hat_FRW[mask]
     f_ML = X_hat_ML[mask]
     f_ORW = X_hat_ORW[mask]
-    f_MS2_sv = X_hat_MS[mask]
 
     v_FRW = vE_FRW[mask]
     v_ML = vE_ML[mask]
     v_ORW = vE_ORW[mask]
-    v_MS2_sv = vE_MS[mask]
 
-    out = np.full((6, 2), np.nan)
+    has_ms = X_hat_MS is not None and vE_MS is not None
+    out = np.full((6 if has_ms else 4, 2), np.nan)
 
     # --- RMSE Ratios ---
     out[0, 0] = rmse(y_, f_FRW) / rmse(y_, f_ML)
     out[2, 0] = rmse(y_, f_FRW) / rmse(y_, f_ORW)
-    out[4, 0] = rmse(y_, f_FRW) / rmse(y_, f_MS2_sv)
 
     # --- DM Tests ---
     out[1, 0] = DieboldMarianoTest(v_FRW, v_ML, H)
     out[3, 0] = DieboldMarianoTest(v_FRW, v_ORW, H)
-    out[5, 0] = DieboldMarianoTest(v_FRW, v_MS2_sv, H)
+
+    if has_ms:
+        f_MS2_sv = X_hat_MS[mask]
+        v_MS2_sv = vE_MS[mask]
+        out[4, 0] = rmse(y_, f_FRW) / rmse(y_, f_MS2_sv)
+        out[5, 0] = DieboldMarianoTest(v_FRW, v_MS2_sv, H)
     
     # --- Parameters ---
     out[0, 1] = par_optim(rho)[0]  # optimized rho
