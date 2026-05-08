@@ -23,5 +23,5 @@ It implements the Flexible Rolling-Window (FRW) estimator and evaluates its perf
 **Location:** `frw/Empirics/`  
 
 **File:** `main.py`  
-Replicates **Tables 3 and 4** and **Figure 4** from Section 6.  
+Replicates **Tables 3--6** and **Figure 4** from Section 6.  
 It estimates FRW, ORW, MLE, and Markov-Switching benchmark models using U.S. macroeconomic time series stored in `data/macro_data.csv` and generates the forecast evaluation results.
