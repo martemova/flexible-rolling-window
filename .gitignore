@@ -26,3 +26,5 @@ frw/MonteCarlo/fun/__pycache__/dgps.cpython-312.pyc
 frw/MonteCarlo/fun/__pycache__/fun.cpython-312.pyc
 frw/MonteCarlo/fun/__pycache__/plots.cpython-312.pyc
 results/.DS_Store
+.gitattributes
+.gitignore
