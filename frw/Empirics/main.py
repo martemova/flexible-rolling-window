@@ -34,7 +34,7 @@ Outputs
 - results/Figures/alpha_FRW.pdf
 
 
-ALternative option is to replicate Tables 5 and 6 from Appendix 
+ALternative option is to replicate Table 5 from Appendix 
 
 author: Mariia Artemova
 """
@@ -122,6 +122,36 @@ def _date_mask(index, start, end):
     if start is None or end is None:
         return pd.Series(False, index=index)
     return (index >= pd.Timestamp(start)) & (index <= pd.Timestamp(end))
+
+
+def _extract_table_body(latex_table: str) -> str:
+    start = latex_table.index(r"\centering")
+    end = latex_table.index(r"\end{tabular}") + len(r"\end{tabular}")
+    return latex_table[start:end]
+
+
+def _combine_appendix_tables(latex_h1: str, latex_h3: str) -> str:
+    return "\n".join(
+        [
+            r"\begin{table}[h]",
+            r"\begin{subtable}{\textwidth}",
+            _extract_table_body(latex_h1),
+            r"\caption{$n=1$}",
+            r"\label{tab:ext1}",
+            r"\end{subtable}",
+            "",
+            r"\vspace{1em}",
+            "",
+            r"\begin{subtable}{\textwidth}",
+            _extract_table_body(latex_h3),
+            r"\caption{$n=3$}",
+            r"\label{tab:ext2}",
+            r"\end{subtable}",
+            r"\caption{Out-of-sample forecasting performance for horizon $n$, extended sample (Jan 1950--Sep 2025, excluding March 2020--Sep 2021). \small We refer to Table~\ref{tab:A1} for further explanations. }",
+            r"\label{tab:extended}",
+            r"\end{table}",
+        ]
+    )
 
 
 def run(config: RunConfig):
@@ -312,10 +342,14 @@ def run(config: RunConfig):
     latex_h1 = build_table(tables, SERIES, 1, horizon_label="n=1")
     latex_h3 = build_table(tables, SERIES, 3, horizon_label="n=3")
 
-    with open(results_dir / "tables" / config.table_h1, "w") as f:
-        f.write(latex_h1)
-    with open(results_dir / "tables" / config.table_h3, "w") as f:
-        f.write(latex_h3)
+    if config.name == "appendix":
+        with open(results_dir / "tables" / config.table_h1, "w") as f:
+            f.write(_combine_appendix_tables(latex_h1, latex_h3))
+    else:
+        with open(results_dir / "tables" / config.table_h1, "w") as f:
+            f.write(latex_h1)
+        with open(results_dir / "tables" / config.table_h3, "w") as f:
+            f.write(latex_h3)
 
     if config.save_pickle:
         with open(results_dir / config.pickle_name, "wb") as f:
@@ -337,8 +371,7 @@ def run(config: RunConfig):
     return tables
 
 
-# run_setup = "main" 
-run_setup = "appendix"
+run_setup = "main"
 
 parser = argparse.ArgumentParser(description="Run one of the empirical forecasting exercises.")
 parser.add_argument(

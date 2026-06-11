@@ -284,7 +284,7 @@ def RMSEFRW_X(dGamma0, y, x, z, iRW, iCVbegin, iT, iH=1):
             beta_hat, sigma_hat = weighted_ar1_X(Y, X, np.ones_like(vW))
 
         # 1-step ahead forecast: use last available lag value (the last element of lagged vector)
-        dyhat = beta_hat[0] + beta_hat[1] * y[it + iRW - 1] + beta_hat[2:] * x[it + iRW - 1, :]
+        dyhat = beta_hat[0] + beta_hat[1] * y[it + iRW - 1] + beta_hat[2:] @ x[it + iRW - 1, :]
 
         # actual y at forecast point
         if actual_index >= len(y):

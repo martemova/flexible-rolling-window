@@ -27,12 +27,11 @@ def figure(res, Z, x, s='UNRATE', p=4, k=1):
         ``k >= 1`` corresponds to the AR(k) coefficient.
 
     """
-    repo_root = Path(__file__).resolve()
-    while repo_root.name != "FRW" and repo_root.parent != repo_root:
-        repo_root = repo_root.parent
+    repo_root = Path(__file__).resolve().parents[3]
     output_dir = repo_root / "results" / "Figures"
     output_dir.mkdir(parents=True, exist_ok=True)
-    output_path = output_dir / "alpha_FRW.pdf"
+    output_path_eps = output_dir / "alpha_FRW.eps"
+    output_path_jpg = output_dir / "alpha_FRW.jpg"
     theta_FRW = res[f'{s}_AR{p}']['theta_FRW'][:, 0, k]
     theta_ML = res[f'{s}_AR{p}']['theta_ML'][:, 0, k]
 
@@ -68,5 +67,6 @@ def figure(res, Z, x, s='UNRATE', p=4, k=1):
     plt.grid(True, alpha=0.3)
 
     plt.tight_layout()
-    plt.savefig(output_path)
+    fig.savefig(output_path_eps, format="eps")
+    fig.savefig(output_path_jpg, format="jpg", dpi=300)
     plt.show()
